@@ -1,31 +1,31 @@
 # IngeniumReltionalDB
 
-Учебный проект: минимальная СУБД «с нуля» — каталог таблиц, постраничная куча со слотами, уникальные btree-индексы (отдельные файлы), тонкий SQL-слой поверх.
+Educational project: a minimal database engine built from scratch — table catalog, paged slotted heap, unique btree indexes (separate files), and a thin SQL layer on top.
 
-**Сборка и запуск**
+**Build and run**
 
 ```bash
 ./gradlew test
 ./gradlew run
 ```
 
-Зависимости: Java, Gradle; индексы — библиотека [btree4j](https://github.com/myui/btree4j) (`io.github.myui:btree4j:0.9.1`).
+Requirements: Java, Gradle; indexes use [btree4j](https://github.com/myui/btree4j) (`io.github.myui:btree4j:0.9.1`).
 
 ---
 
-## Общая схема системы
+## System overview
 
-Два почти независимых мира на диске:
+Two largely independent on-disk worlds:
 
-1. **Куча (heap)** — ваши страницы фиксированного размера (`PageStore` / `FilePageStore`), внутри — слоты (`SlottedPage`).
-2. **Индексы** — отдельные файлы B+-дерева btree4j; в значениях лежит сериализованный `RecordId` (6 байт), а не «страница кучи».
+1. **Heap** — fixed-size pages (`PageStore` / `FilePageStore`) with slot management (`SlottedPage`).
+2. **Indexes** — separate btree4j B+-tree files; values store a serialized `RecordId` (6 bytes), not a “heap page” pointer.
 
-Связка: ключ в индексе → `RecordId` → чтение tuple из кучи по `(pageId, slot)`.
+The link: index key → `RecordId` → read the tuple from the heap at `(pageId, slot)`.
 
 ```mermaid
 flowchart TB
-    subgraph app [Приложение]
-        Main[Main / тесты]
+    subgraph app [Application]
+        Main[Main / tests]
         SE[SqlEngine]
     end
 
@@ -37,7 +37,7 @@ flowchart TB
         SE --> SP --> SA --> PO --> DE
     end
 
-    subgraph ctx [Контекст]
+    subgraph ctx [Context]
         EC[ExecutionContext]
         CAT[Catalog]
         EC --> CAT
@@ -49,8 +49,8 @@ flowchart TB
     CAT -->|"openTable(name)"| FACT[PagedHeapTableStorageFactory.open]
     FACT --> PHT[PagedHeapTableStorage]
 
-    subgraph disk [Файлы на диске]
-        HEAP[(heap файл)]
+    subgraph disk [On-disk files]
+        HEAP[(heap file)]
         PKIDX[(primary btree)]
         SECIDX[(secondary btree × N)]
     end
@@ -59,21 +59,21 @@ flowchart TB
     PHT --> PKIDX
     PHT --> SECIDX
 
-    subgraph mem [Память процесса]
+    subgraph mem [Process memory]
         FSM[FreeSpaceMap]
     end
-    PHT -.->|"оценка свободного места"| FSM
+    PHT -.->|"free space estimate"| FSM
 ```
 
 ---
 
-## Поток выполнения SQL
+## SQL execution path
 
-1. **`SqlEngine.execute(sql, ctx)`** — единая точка входа.
-2. **`SimpleSqlParser`** — regex, не полноценный лексер: строит `InsertAst` / `SelectAst` (`Ast`).
-3. **`SimpleAnalyzer`** — привязывает AST к `AnalyzedStatement` (имя таблицы, `INSERT`/`SELECT`, для INSERT — `Row`).
-4. **`PassThroughOptimizer`** — сейчас тождественное преобразование (заготовка под будущий оптимизатор).
-5. **`DefaultExecutor`** — по `ExecutionContext.catalog()` открывает таблицу и вызывает `TableStorage.insert` или `TableStorage.scan`.
+1. **`SqlEngine.execute(sql, ctx)`** — single entry point.
+2. **`SimpleSqlParser`** — regex-based, not a full lexer: builds `InsertAst` / `SelectAst` (`Ast`).
+3. **`SimpleAnalyzer`** — maps the AST to `AnalyzedStatement` (table name, `INSERT`/`SELECT`, `Row` for INSERT).
+4. **`PassThroughOptimizer`** — identity for now (placeholder for a future optimizer).
+5. **`DefaultExecutor`** — uses `ExecutionContext.catalog()` to open the table and calls `TableStorage.insert` or `TableStorage.scan`.
 
 ```mermaid
 sequenceDiagram
@@ -103,98 +103,98 @@ sequenceDiagram
     end
 ```
 
-### Поддерживаемый SQL (строго)
+### Supported SQL (strict)
 
-| Операция | Формат |
-|----------|--------|
-| INSERT | `INSERT INTO <table> VALUES (<int64>, '<text>');` — второй аргумент строка в одинарных кавычках, без экранирования кроме как в regex. |
-| SELECT | `SELECT * FROM <table>` (точка с запятой опциональна). |
+| Statement | Format |
+|-------------|--------|
+| INSERT | `INSERT INTO <table> VALUES (<int64>, '<text>');` — second value is a single-quoted string; escaping is only what the regex allows. |
+| SELECT | `SELECT * FROM <table>` (trailing semicolon optional). |
 
-Имя таблицы должно совпадать с зарегистрированным в `Catalog` (`TableDescriptor.id().name()`).
-
----
-
-## Каталог и дескриптор таблицы
-
-- **`Catalog`** — потокобезопасная in-memory карта `имя таблицы → TableDescriptor`.
-- **`TableDescriptor`** — `TableId`, `Schema`, путь к **heap**, путь к **первичному** индексу, карта `имя вторичного индекса → путь к файлу`.
-
-Открытие: `catalog.openTable(name)` → `PagedHeapTableStorageFactory.open(descriptor)` создаёт `FilePageStore` и все `Btree4jSecondaryIndex` по путям из дескриптора.
+The table name must match the one registered in `Catalog` (`TableDescriptor.id().name()`).
 
 ---
 
-## Схема строки (`Schema`)
+## Catalog and table descriptor
 
-- Список колонок (`Column` + `ColumnType`), индекс колонки первичного ключа (сейчас только **INT64**).
-- Опционально: уникальные **вторичные** индексы: имя → индекс колонки (не PK).
+- **`Catalog`** — thread-safe in-memory map `table name → TableDescriptor`.
+- **`TableDescriptor`** — `TableId`, `Schema`, path to the **heap**, path to the **primary** index, and a map `secondary index name → file path`.
 
-Утилиты: `Schema.defaultRowSchema()` — `(id PK, text)` без вторичных; `defaultRowSchemaWithTextSecondary()` — вторичный индекс `text_idx` на колонку `text`.
+Opening: `catalog.openTable(name)` → `PagedHeapTableStorageFactory.open(descriptor)` creates the `FilePageStore` and every `Btree4jSecondaryIndex` from paths in the descriptor.
 
 ---
 
-## Хранение: `PagedHeapTableStorage`
+## Row layout (`Schema`)
 
-### Роль компонентов
+- Ordered columns (`Column` + `ColumnType`), primary key column index (currently **INT64** only).
+- Optional unique **secondary** indexes: name → column index (not the PK).
 
-| Компонент | Назначение |
-|-----------|------------|
-| `FilePageStore` | Файл кучи: страница `pageId` → смещение `[pageId × pageSize, …)`; размер страницы по умолчанию **512** байт (`PagedHeapTableStorageFactory.DEFAULT_PAGE_SIZE`). |
-| `SlottedPage` | Разбор/сборка одной страницы: заголовок, tuple’ы снизу вверх от фиксированного offset, каталог слотов сверху вниз от конца страницы. |
-| `FreeSpaceMap` | In-memory `pageId → availableBytes` для быстрого выбора страницы под новый tuple; при первом insert после открытия при непустом файле делается **rebuild** по всем страницам. |
-| `TupleCodec` | Кодирование строки в байты по `Schema` (в т.ч. ключи для индексов). |
-| `Btree4jSecondaryIndex` | Реализация `SecondaryIndex`: ключ → значение `RecordId.toBytes()`. И первичный, и вторичные индексы — этот тип (отдельные файлы). |
+Helpers: `Schema.defaultRowSchema()` — `(id PK, text)` with no secondaries; `defaultRowSchemaWithTextSecondary()` — secondary index `text_idx` on column `text`.
 
-### Вставка строки (логика)
+---
 
-1. Проверка уникальности PK и всех заданных вторичных ключей по индексам.
-2. Кодирование tuple, **`insertTupleOnly`**:
-   - ленивая инициализация `FreeSpaceMap` (rebuild при необходимости);
-   - `pickPage(tuple.length)` — страница с достаточным `SlottedPage.availableBytes`;
-   - при промахе hint — полный перебор существующих страниц;
-   - иначе `allocatePage`, `SlottedPage.initEmpty`, вставка;
-   - после успешной записи — обновление карты для страницы.
-3. Запись в PK-индекс и во все вторичные индексы пар `(key bytes → RecordId)`.
+## Storage: `PagedHeapTableStorage`
 
-### Макет слотовой страницы (`SlottedPage`)
+### Component roles
 
-Страница — один `ByteBuffer` длины `pageSize`.
+| Component | Role |
+|-----------|------|
+| `FilePageStore` | Heap file: page `pageId` maps to byte range `[pageId × pageSize, …)`; default page size **512** bytes (`PagedHeapTableStorageFactory.DEFAULT_PAGE_SIZE`). |
+| `SlottedPage` | Encode/decode one page: header, tuples growing upward from a fixed offset, slot directory growing downward from the end. |
+| `FreeSpaceMap` | In-memory `pageId → availableBytes` to pick a page for a new tuple; on first insert after open with a non-empty file, a full-page **rebuild** runs if needed. |
+| `TupleCodec` | Encode rows to bytes per `Schema` (including index keys). |
+| `Btree4jSecondaryIndex` | `SecondaryIndex` implementation: key → `RecordId.toBytes()`. Both primary and secondary indexes use this type (separate files). |
+
+### Insert path
+
+1. Enforce uniqueness of the PK and all configured secondary keys via indexes.
+2. Encode the tuple, then **`insertTupleOnly`**:
+   - lazy `FreeSpaceMap` init (rebuild when needed);
+   - `pickPage(tuple.length)` — a page with enough `SlottedPage.availableBytes`;
+   - if the hint fails, scan all existing pages;
+   - otherwise `allocatePage`, `SlottedPage.initEmpty`, insert;
+   - after a successful write, refresh the map for that page.
+3. Insert `(key bytes → RecordId)` into the PK index and every secondary index.
+
+### Slotted page layout (`SlottedPage`)
+
+A page is one `ByteBuffer` of length `pageSize`.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ Заголовок 16 B: magic, число слотов, границы свободной зоны  │
+│ Header 16 B: magic, slot count, free-space boundaries      │
 ├─────────────────────────────────────────────────────────────┤
-│ Tuple 0, Tuple 1, … растут от offset HEADER (16) вверх     │
-├ ─ ─ ─ ─ ─ ─ ─ ─ ─ свободное пространство ─ ─ ─ ─ ─ ─ ─ ─ ─ ┤
-│ … каталог слотов с конца: (u16 offset, u16 length) на слот  │
+│ Tuple 0, Tuple 1, … grow upward from HEADER offset (16)     │
+├ ─ ─ ─ ─ ─ ─ ─ ─ ─ free space ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┤
+│ … slot directory from the end: (u16 offset, u16 length)     │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-`RecordId` = `(pageId: int, slot: short)` — 6 байт big-endian в btree-значениях.
+`RecordId` = `(pageId: int, slot: short)` — 6 bytes big-endian in btree values.
 
-### Почему индекс ≠ страница кучи
+### Why an index page is not a heap page
 
-Файл btree4j имеет **свой** формат страниц и не совпадает с `PageStore`. Комментарий в `storage.page` package-info это фиксирует. Единственный «мост» — сериализованный `RecordId` в значении индекса.
-
----
-
-## Файлы в репозитории (ориентир)
-
-| Область | Пакет / классы |
-|---------|----------------|
-| Точка входа | `org.example.Main` |
-| SQL фасад | `org.example.core.exec.SqlEngine`, `DefaultExecutor` |
-| Парсер / анализ | `SimpleSqlParser`, `SimpleAnalyzer`, `PassThroughOptimizer` |
-| DTO | `dto.*` — `Ast`, `AnalyzedStatement`, `ExecutionResult`, `Row`, `RecordId`, `TableDescriptor`, … |
-| Каталог | `catalog.Catalog` |
-| Куча | `storage.impl.PagedHeapTableStorage`, `PagedHeapTableStorageFactory` |
-| Страницы | `storage.page.*` — `FilePageStore`, `SlottedPage`, `FreeSpaceMap` |
-| Индексы | `index.Btree4jSecondaryIndex`, `SecondaryIndex` |
-| Тесты | `SqlPipelineTest`, `FreeSpaceMapTest`, индексные/хранилищные тесты в `src/test` |
+The btree4j file has its **own** page format and does not match `PageStore` pages. The `storage.page` package-info states this. The only bridge is the serialized `RecordId` stored as the index value.
 
 ---
 
-## Краткий чеклист для расширения
+## Repository map (quick reference)
 
-- Новый синтаксис SQL → расширить `SimpleSqlParser`, AST и `SimpleAnalyzer` / `DefaultExecutor`.
-- Новые типы колонок / кодировка → `TupleCodec`, `ColumnType`, проверки в `Schema`.
-- Оптимизация запросов → реальная логика в `PassThroughOptimizer` и, при необходимости, новые «планы» вместо одного `AnalyzedStatement`.
+| Area | Package / classes |
+|------|-------------------|
+| Entry point | `org.example.Main` |
+| SQL facade | `org.example.core.exec.SqlEngine`, `DefaultExecutor` |
+| Parse / analyze | `SimpleSqlParser`, `SimpleAnalyzer`, `PassThroughOptimizer` |
+| DTOs | `dto.*` — `Ast`, `AnalyzedStatement`, `ExecutionResult`, `Row`, `RecordId`, `TableDescriptor`, … |
+| Catalog | `catalog.Catalog` |
+| Heap | `storage.impl.PagedHeapTableStorage`, `PagedHeapTableStorageFactory` |
+| Pages | `storage.page.*` — `FilePageStore`, `SlottedPage`, `FreeSpaceMap` |
+| Indexes | `index.Btree4jSecondaryIndex`, `SecondaryIndex` |
+| Tests | `SqlPipelineTest`, `FreeSpaceMapTest`, index/storage tests under `src/test` |
+
+---
+
+## Extension checklist
+
+- New SQL syntax → extend `SimpleSqlParser`, AST, and `SimpleAnalyzer` / `DefaultExecutor`.
+- New column types / encoding → `TupleCodec`, `ColumnType`, `Schema` validation.
+- Query optimization → real logic in `PassThroughOptimizer` and, if needed, richer plans than a single `AnalyzedStatement`.
